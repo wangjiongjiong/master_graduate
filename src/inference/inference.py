@@ -17,7 +17,8 @@ from src.datasets.dataset_display import MyDataset
 from torch.utils.data import DataLoader
 
 original_path = 'demo/txt'
-ckpt_file_path = './ckpt/aerogen_diorr_last.ckpt'
+#ckpt_file_path = './ckpt/aerogen_diorr_last.ckpt'
+ckpt_file_path = './ckpt/last.ckpt'
 resolution = 512
 mask_size = 64
 mode = 'test'
@@ -51,7 +52,8 @@ def create_model(config_path):
     return model
 
 model = create_model('configs/stable-diffusion/dual/v1-finetune-DIOR-R.yaml').cuda()
-model.load_state_dict(load_state_dict(ckpt_file_path, location='cpu'))
+#model.load_state_dict(load_state_dict(ckpt_file_path, location='cpu'))
+model.load_state_dict(load_state_dict(ckpt_file_path, location='cpu'), strict=False)
 model = model.cuda()
 ddim_sampler = DDIMSampler(model)
 

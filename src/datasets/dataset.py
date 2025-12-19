@@ -298,9 +298,9 @@ class MyDataset(Dataset):
 
 if __name__ == "__main__":
     
-    original_path = './dataset/DIOR-VOC/Annotations/Oriented_Bounding_Boxes/'
-    image_file_path = './dataset/DIOR-VOC/VOC2007/JPEGImages/'
-    npy_file_path = './dataset/DIOR-VOC/VOC2007/Images_Embeddings/'
+    original_path = './datasets/DIOR-VOC/Annotations/Oriented_Bounding_Boxes/'
+    image_file_path = './datasets/DIOR-VOC/VOC2007/JPEGImages/'
+    npy_file_path = './datasets/DIOR-VOC/VOC2007/Images_Embeddings/'
     resolution = 512
     mask_size = 64
 
