@@ -11,6 +11,9 @@ from torch.utils.data import random_split, DataLoader, Dataset, Subset
 from functools import partial
 from PIL import Image
 
+if not hasattr(Image, 'ANTIALIAS'):
+    Image.ANTIALIAS = Image.LANCZOS
+
 from pytorch_lightning import seed_everything
 from pytorch_lightning.trainer import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, Callback, LearningRateMonitor
@@ -19,6 +22,9 @@ from pytorch_lightning.utilities import rank_zero_info
 
 from ldm.data.base import Txt2ImgIterableBaseDataset
 from ldm.util import instantiate_from_config
+
+import argparse, os, sys, datetime, glob, importlib, csv
+import requests  # 新增，用于调用 DeepSeek API
 
 def get_state_dict(d):
     return d.get('state_dict', d)
@@ -435,6 +441,117 @@ class CUDACallback(Callback):
         except AttributeError:
             pass
 
+    # --- 新增 DeepSeek 逻辑开始 ---
+class DeepSeekClient:
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.url = "https://api.deepseek.com/chat/completions"
+
+    def fetch_rich_caption(self, class_names):
+        items = ", ".join(class_names)
+        prompt = (f"As an expert in satellite imagery, describe a scene containing: {items}. "
+                  f"Provide a natural, vivid one-sentence description focusing on typical aerial textures "
+                  f"and spatial arrangements. Keep it under 40 words.")
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+        payload = {
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7
+        }
+        try:
+            response = requests.post(self.url, json=payload, headers=headers, timeout=15)
+            res_json = response.json()
+            
+            # 如果报错 'choices'，我们就看看到底返回了什么
+            if 'choices' not in res_json:
+                print(f">>> DeepSeek API Response Error: {res_json}")
+                return None
+                
+            return res_json['choices'][0]['message']['content']
+        except Exception as e:
+            print(f">>> Network or JSON Error: {e}")
+            return None
+
+class DeepSeekRefineCallback(Callback):
+    def __init__(self, api_key, interval=10, batch_size=20):
+        super().__init__()
+        self.client = DeepSeekClient(api_key)
+        self.interval = interval
+        self.batch_size = batch_size
+
+    # --- 新增：在训练最开始（Epoch 0 之前）执行一次 ---
+    def on_train_start(self, trainer, pl_module):
+        if trainer.global_rank == 0:
+            print("\n>>> [Initial Phase] Triggering DeepSeek to refine first batch of captions...")
+            self._refine_dataset_captions(trainer)
+
+    # --- 保持原有：每隔 N 个 Epoch 执行一次 ---
+    def on_train_epoch_start(self, trainer, pl_module):
+        epoch = trainer.current_epoch
+        # 修改判断条件：允许在 Epoch 0 触发（如果需要），或者保持 interval 逻辑
+        if epoch > 0 and epoch % self.interval == 0:
+            if trainer.global_rank == 0:
+                print(f"\n>>> [Epoch {epoch}] Triggering DeepSeek update...")
+                self._refine_dataset_captions(trainer)
+
+    def _refine_dataset_captions(self, trainer):
+        # 1. 尝试从 datamodule 直接获取（这是最稳妥的路径）
+        target_dataset = None
+        if hasattr(trainer, 'datamodule') and trainer.datamodule is not None:
+            # 你的代码里 data = instantiate_from_config(config.data) 得到的是 DataModuleFromConfig
+            dm = trainer.datamodule
+            if hasattr(dm, 'datasets') and 'train' in dm.datasets:
+                target_dataset = dm.datasets['train']
+        
+        # 2. 如果第一步失败，再尝试从 dataloader 找 (逻辑补强)
+        if target_dataset is None:
+            dataloader = trainer.train_dataloader
+            # 某些版本的 Lightning 会返回一个包含多个 loader 的列表
+            if isinstance(dataloader, list): dataloader = dataloader[0]
+            dataset = dataloader.dataset
+            
+            def find_real_dataset(ds):
+                if hasattr(ds, 'files'): return ds
+                if hasattr(ds, 'data'): return find_real_dataset(ds.data)
+                if hasattr(ds, 'dataset'): return find_real_dataset(ds.dataset)
+                # 处理 CombinedDataset 这种通过属性访问内部 list 的情况
+                if hasattr(ds, 'datasets') and isinstance(ds.datasets, list):
+                    for sub_ds in ds.datasets:
+                        found = find_real_dataset(sub_ds)
+                        if found: return found
+                return None
+            target_dataset = find_real_dataset(dataset)
+
+        # 3. 如果还是 WrappedDataset，再取一次内部的 .data
+        if hasattr(target_dataset, 'data'):
+            target_dataset = target_dataset.data
+
+        if target_dataset is None or not hasattr(target_dataset, 'files'):
+            print(f">>> [Error] Still cannot find MyDataset. Object type: {type(target_dataset)}")
+            return
+
+        # --- 以下逻辑执行 API 调用 ---
+        import random
+        total_files = len(target_dataset.files)
+        sample_indices = random.sample(range(total_files), min(self.batch_size, total_files))
+        
+        new_updates = {}
+        for idx in sample_indices:
+            xml_path = target_dataset.files[idx]
+            # 调用底层解析方法
+            _, filename, _, _, class_names, _ = target_dataset._parse_annotation(xml_path)
+            
+            rich_desc = self.client.fetch_rich_caption(class_names)
+            if rich_desc:
+                new_updates[filename] = rich_desc
+        
+        if hasattr(target_dataset, 'update_llm_cache'):
+            target_dataset.update_llm_cache(new_updates)
+            print(f">>> [Success] DeepSeek refined {len(new_updates)} captions for filename tracking.")
 
 if __name__ == "__main__":
     # custom parser to specify config files, train, test and debug mode,
@@ -680,6 +797,18 @@ if __name__ == "__main__":
             del callbacks_cfg['ignore_keys_callback']
 
         trainer_kwargs["callbacks"] = [instantiate_from_config(callbacks_cfg[k]) for k in callbacks_cfg]
+
+        # --- 注入 DeepSeek Callback 开始 ---
+        # 请在此处填写你的 DeepSeek API Key
+        DEEPSEEK_API_KEY = "sk-0b6123d9da0a4a2ab04eac5b3d3cf04f" 
+
+        ds_callback = DeepSeekRefineCallback(
+            api_key=DEEPSEEK_API_KEY, 
+            interval=5,      # 每 5 个 Epoch 执行一次
+            batch_size=200   # 每次抽取 200 张图片进行描述进化
+        )
+        trainer_kwargs["callbacks"].append(ds_callback)
+        # --- 注入 DeepSeek Callback 结束 ---
 
         trainer = Trainer.from_argparse_args(trainer_opt, **trainer_kwargs)
         trainer.logdir = logdir  ###

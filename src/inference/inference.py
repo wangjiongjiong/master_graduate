@@ -17,8 +17,8 @@ from src.datasets.dataset_display import MyDataset
 from torch.utils.data import DataLoader
 
 original_path = 'demo/txt'
-#ckpt_file_path = './ckpt/aerogen_diorr_last.ckpt'
-ckpt_file_path = './ckpt/last.ckpt'
+ckpt_file_path = './ckpt/aerogen_diorr_last.ckpt'
+#ckpt_file_path = './ckpt/last.ckpt'
 resolution = 512
 mask_size = 64
 mode = 'test'
