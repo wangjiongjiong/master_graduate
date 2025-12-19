@@ -15,8 +15,8 @@ from ldm.models.diffusion.ddim import DDIMSampler
 from src.datasets.dataset_test import MyDataset
 
 # Define paths and parameters
-original_path = './dataset/DIOR-VOC/Annotations/Oriented_Bounding_Boxes/'
-image_file_path = './dataset/DIOR-VOC/VOC2007/JPEGImages/'
+original_path = './datasets/DIOR-VOC/Annotations/Oriented_Bounding_Boxes/'
+image_file_path = './datasets/DIOR-VOC/VOC2007/JPEGImages/'
 ckpt_file_path = './ckpt/aerogen_diorr_last.ckpt'
 output_dir = 'path/to/save/images'
 resolution = 512
