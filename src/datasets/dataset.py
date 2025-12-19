@@ -137,9 +137,9 @@ class MyDataset(Dataset):
         self.mode = mode
 
         if mode=='aug_data':
-            txt_file_path = f'./dataset/DIOR-VOC/VOC2007/ImageSets/Main/train.txt'
+            txt_file_path = f'./datasets/DIOR-VOC/VOC2007/ImageSets/Main/train.txt'
         else:
-            txt_file_path = f'./dataset/DIOR-VOC/VOC2007/ImageSets/Main/{mode}.txt'
+            txt_file_path = f'./datasets/DIOR-VOC/VOC2007/ImageSets/Main/{mode}.txt'
         with open(txt_file_path, 'r') as file:
             file_names = file.read().splitlines()
         

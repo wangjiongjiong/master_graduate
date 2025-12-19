@@ -189,7 +189,7 @@ def main(xml_folder, image_folder, output_folder, txt_file, batch_size):
     print(f"mAP50: {coco_eval.stats[1]}")
     print(f"mAP75: {coco_eval.stats[2]}")
 
-xml_folder = "./dataset/DIOR-VOC/Annotations/Horizontal_Bounding_Boxes/"
+xml_folder = "./datasets/DIOR-VOC/Annotations/Horizontal_Bounding_Boxes/"
 image_folder = 'path/generation/image'
 output_folder = './Yolov8_DIOR/pred'
 txt_file = "./Main/test.txt"

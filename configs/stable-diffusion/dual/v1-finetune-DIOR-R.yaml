@@ -99,8 +99,8 @@ data:
     train:
       target: src.datasets.dataset.MyDataset
       params:
-          original_path : ./dataset/DIOR-VOC/Annotations/Oriented_Bounding_Boxes/
-          image_file_path : ./dataset/DIOR-VOC/VOC2007/JPEGImages/
+          original_path : ./datasets/DIOR-VOC/Annotations/Oriented_Bounding_Boxes/
+          image_file_path : ./datasets/DIOR-VOC/VOC2007/JPEGImages/
           resolution : 512
           mask_size : 64
           mode : train
@@ -120,8 +120,8 @@ data:
     validation:
       target: src.datasets.dataset.MyDataset
       params:
-          original_path : ./dataset/DIOR-VOC/Annotations/Oriented_Bounding_Boxes/
-          image_file_path : ./dataset/DIOR-VOC/VOC2007/JPEGImages/
+          original_path : ./datasets/DIOR-VOC/Annotations/Oriented_Bounding_Boxes/
+          image_file_path : ./datasets/DIOR-VOC/VOC2007/JPEGImages/
           resolution : 512
           mask_size : 64
           mode : val
