@@ -67,30 +67,43 @@ class BLDM(LatentDiffusion):
 
         return x, dict(c_crossattn=[c], bbox_control=[bboxes], category_control=[category_conditions],mask_control=[mask_conditions],mask_vector=[mask_vector])
     
+
     def apply_model(self, x_noisy, t, cond, *args, **kwargs):
         assert isinstance(cond, dict)
         diffusion_model = self.model.diffusion_model
-        cond_txt = torch.cat(cond['c_crossattn'], 1)
-        category_control=cond['category_control']
-        mask_control=cond['mask_control']
-        bbox_control=cond['bbox_control']
-        mask_vector=cond['mask_vector']
+        
+        # 1. 提取来自 DeepSeek 演进的全局文本特征 (AeroGen 的核心演进语义)
+        cond_txt = torch.cat(cond['c_crossattn'], 1) 
+        
+        category_control = cond['category_control']
+        mask_control = cond['mask_control']
+        bbox_control = cond['bbox_control']
+        mask_vector = cond['mask_vector']
 
-        if isinstance(category_control[0],list):
-            category_control=category_control[0]
-        # control = self.condition_tokenizer(x=x_noisy, hint=torch.cat(cond['c_concat'], 1), image_control=image_control, mask_control=mask_control, timesteps=t, context=cond_txt)
-        control = self.condition_tokenizer(text_embeddings=category_control,masks=mask_vector,boxes=bbox_control)
-        # no cut
-        # cond_txt=torch.cat((cond_txt,control),dim=1)
-        eps = diffusion_model(x=x_noisy, timesteps=t, context=cond_txt, control=control, category_control=category_control, mask_control=mask_control
-                            )
-        # print(eps.shape)
-        
-            #image_control=image_control,mask_control=mask_control
-        
-        # if classifier is not None:
-        #     a=1
-        # print(eps)
+        # 2. 对齐输入格式：如果传入的是列表，解包获取 Tensor
+        if isinstance(category_control, list):
+            category_control = category_control[0]
+        if isinstance(bbox_control, list):
+            bbox_control = bbox_control[0]
+
+        # 3. 调用融合了 CC-Diff 的新 Tokenizer (SerialSampler) [cite: 58, 99, 103]
+        # 它返回：embed_objs (前景特征), embed_context (带有前背景关联的背景语义) [cite: 186]
+        embed_objs, embed_context = self.condition_tokenizer(
+            text_embeddings=category_control,
+            boxes=bbox_control,
+            x_bg=cond_txt
+        )
+
+        # 4. 执行扩散模型推理 [cite: 78, 100]
+        # 将带有物理相干性的 embed_context 传给 context [cite: 14, 123]
+        eps = diffusion_model(
+            x=x_noisy, 
+            timesteps=t, 
+            context=embed_context, 
+            control=embed_objs,
+            category_control=cond['category_control'], 
+            mask_control=mask_control
+        )
 
         return eps
     

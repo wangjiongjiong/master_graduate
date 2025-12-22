@@ -75,11 +75,11 @@ model:
       #   # extend_outputlen: 385 ## 77*5
       #   extend_outputlen: 616 ## 77*8 1232
 
-    condition_tokenizer:
-      target: bldm.condition_encoder.RBoxEncoder
-      params:
-        in_dim: 768
-        out_dim: 768
+    #condition_tokenizer:
+    #  target: bldm.condition_encoder.RBoxEncoder
+    #  params:
+    #    in_dim: 768
+    #    out_dim: 768
     # mask_attention:
     #   target: bldm.mask_attention.MaskCrossAttention
     #   params:
@@ -88,13 +88,21 @@ model:
     #     d_head: 40
     #     inner_dim: 320
     #     context_dim: 768
+    condition_tokenizer:
+      target: ldm.cc_modules.SerialSampler
+      params:
+        dim: 1024
+        depth: 4
+        num_queries: [8, 8, 8]  # FG, BG, Bridge
+        embedding_dim: 768
+        output_dim: 768  # 必须与你的 context_dim 一致
 
 
 data:
   target: main.DataModuleFromConfig
   params:
     batch_size: 1
-    num_workers: 8
+    num_workers: 4
     wrap: false
     train:
       target: src.datasets.dataset.MyDataset

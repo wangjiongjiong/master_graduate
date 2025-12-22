@@ -295,6 +295,8 @@ class SetupCallback(Callback):
                     os.makedirs(os.path.join(self.ckptdir, 'trainstep_checkpoints'), exist_ok=True)
             print("Project config")
             print(OmegaConf.to_yaml(self.config))
+            config_path = os.path.join(self.logdir, "configs")
+            os.makedirs(config_path, exist_ok=True)
             OmegaConf.save(self.config,
                            os.path.join(self.cfgdir, "{}-project.yaml".format(self.now)))
 
@@ -704,7 +706,7 @@ if __name__ == "__main__":
 
         # model
         model = instantiate_from_config(config.model)
-        model.load_state_dict(load_state_dict(opt.prepare_weight, location='cpu'))
+        model.load_state_dict(load_state_dict(opt.prepare_weight, location='cpu'),strict=False)
 
         # trainer and callbacks
         trainer_kwargs = dict()
