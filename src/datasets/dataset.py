@@ -2,15 +2,14 @@ import os
 import cv2
 import numpy as np
 import random
-import matplotlib.pyplot as plt
 import xml.etree.ElementTree as ET
 from torch.utils.data import Dataset
 
 max_length = 15
 
-# --- 原有的辅助函数保持不变 ---
+# --- 图像处理辅助函数 (保持原有逻辑) ---
 def resize_image_and_bboxes(image, bboxes, target_size=(512, 512)):
-    original_size = (800,800)
+    original_size = (800, 800)
     image_resized = cv2.resize(image, target_size)
     scale_x = target_size[1] / original_size[1]
     scale_y = target_size[0] / original_size[0]
@@ -60,10 +59,10 @@ def calculate_max_square(corners):
 def crop_and_resize(image, corners, target_size=(512, 512)):
     x_min_s, y_min_s, x_max_s, y_max_s = calculate_max_square(corners)
     image_cropped = image[int(y_min_s):int(y_max_s), int(x_min_s):int(x_max_s)]
-    if image_cropped.size == 0: raise ValueError("Cropped image is empty.")
+    if image_cropped.size == 0: return cv2.resize(image, target_size) # 防止裁剪失败
     return cv2.resize(image_cropped, target_size)
 
-# --- 修改后的 MyDataset 类 ---
+# --- 核心 Dataset 类 ---
 class MyDataset(Dataset):
     def __init__(self, original_path, image_file_path, resolution, mask_size, mode='train', rotate_once=False, rotate_twice=False):
         self.original_path = original_path
@@ -72,9 +71,10 @@ class MyDataset(Dataset):
         self.mask_size = (mask_size, mask_size)
         self.rotate_once = rotate_once
         self.rotate_twice = rotate_twice
+        self.mode = mode
         
-        # --- 新增：DeepSeek 缓存字典 ---
-        self.llm_cache = {} 
+        # 1. 动态语义存储
+        self.llm_cache = {}  # 存储针对特定图片的 DeepSeek 描述 {"05862.jpg": "..."}
         
         self.category = {
             "airplane": 0, "airport": 1, "baseballfield": 2, "basketballcourt": 3, "bridge": 4,
@@ -83,6 +83,8 @@ class MyDataset(Dataset):
             "stadium": 14, "storagetank": 15, "tenniscourt": 16, "trainstation": 17, "vehicle": 18,
             "windmill": 19
         }
+        
+        # 2. 全局描述模板 (Callback 会每隔几个 Epoch 全量更新这个字典)
         self.descriptions = {
             "airplane": "airplane parked on the ground", "airport": "busy airport",
             "baseballfield": "green baseball field", "basketballcourt": "outdoor basketball court",
@@ -95,9 +97,9 @@ class MyDataset(Dataset):
             "tenniscourt": "clay tennis court", "trainstation": "crowded train station",
             "vehicle": "vehicle on the road", "windmill": "rotating windmill"
         }
+
         self.category_embeddings = np.load('./datasets/category_embeddings.npy')
         self.condition_dropout_prob = 0.1
-        self.mode = mode
 
         txt_file_path = f'./datasets/DIOR-VOC/VOC2007/ImageSets/Main/{"train" if mode=="aug_data" else mode}.txt'
         with open(txt_file_path, 'r') as file:
@@ -105,23 +107,26 @@ class MyDataset(Dataset):
         
         self.files = [os.path.join(original_path, f'{file_name}.xml') for file_name in file_names]
 
-    # --- 新增：更新接口 ---
+    # --- 外部更新接口 ---
     def update_llm_cache(self, new_captions):
-        """用于 main.py 通过 Callback 注入 DeepSeek 的描述"""
+        """更新特定图片的长描述"""
         self.llm_cache.update(new_captions)
+
+    def update_descriptions(self, new_vocab):
+        """全量演进 20 个类别的基础描述模板"""
+        self.descriptions.update(new_vocab)
 
     def __len__(self):
         return len(self.files)
     
     def __getitem__(self, idx):
         xml_file_path = self.files[idx]
-        # 获取基础信息，注意 _parse_annotation 保持不变
         image, filename, img_size, bboxes, class_names, _ = self._parse_annotation(xml_file_path)
         
-        # --- 修改：传递 filename 给 prompt 生成函数 ---
+        # 生成 Prompt (融入动态演进逻辑)
         prompt = self._generate_prompt(filename, class_names)
         
-        # --- 以下原有的数据增强逻辑完全保持不变 ---
+        # 图像处理流水线
         image_resized, bboxes_resized = resize_image_and_bboxes(image, bboxes, target_size=(512, 512))
         
         if self.rotate_once or self.rotate_twice:
@@ -136,8 +141,7 @@ class MyDataset(Dataset):
         if self.rotate_twice:
             h, w = rot_image.shape[:2]
             corners = np.array([[0, 0], [0, h], [w, 0], [w, h]])
-            # 注意：此处旋转中心坐标逻辑保持你的原有实现
-            corners_rot = np.array([rotate_point(x, y, w // 2, h // 2, angle_fine if self.rotate_twice else 0) for x, y in corners])
+            corners_rot = np.array([rotate_point(x, y, w // 2, h // 2, angle_fine) for x, y in corners])
             rot_image = crop_and_resize(rot_image, corners_rot, target_size=(512, 512))
         
         mask_conditions, final_bboxes, mask_vector = self._generate_mask(rot_bboxes, self.resolution, self.mask_size)
@@ -153,36 +157,33 @@ class MyDataset(Dataset):
             mask_vector=mask_vector
         )
 
-    # --- 修改：Prompt 生成逻辑 ---
     def _generate_prompt(self, filename, class_names):
-        if self.mode == 'train':
-            if random.random() < self.condition_dropout_prob:
-                return ''
+        if self.mode == 'train' and random.random() < self.condition_dropout_prob:
+            return ''
 
-        # 优先从缓存读取 DeepSeek 描述
+        # A. 优先查图片级缓存 (Specific LLM Context)
         if filename in self.llm_cache:
             return self.llm_cache[filename]
 
-        # 如果没有缓存，运行原来的模板拼接逻辑
+        # B. 否则使用当前的 descriptions 字典 (Evolving Global Context)
         unique_class_names = list(set(class_names))
         prompt = 'an aerial image with '
         if len(unique_class_names) == 1:
             prompt += self.descriptions[unique_class_names[0]]
         else:
-            prompt += ', '.join([self.descriptions[name] for name in unique_class_names[:-1]]) + ' and ' + self.descriptions[unique_class_names[-1]]
+            parts = [self.descriptions[name] for name in unique_class_names]
+            prompt += ', '.join(parts[:-1]) + ' and ' + parts[-1]
         return prompt
 
-    # --- 原有方法保持不变 ---
     def _generate_mask(self, bboxes, source_size, target_size):
-        source_height, source_width = (512, 512)
         target_height, target_width = target_size
         mask_list, bbox_list = [], []
         mask_vector = np.zeros(max_length, dtype=np.float32)
         for i, bbox in enumerate(bboxes):
             if i >= max_length: break
             x_coords, y_coords = bbox
-            x_scaled = (np.array(x_coords) * target_width / source_width).astype(int)
-            y_scaled = (np.array(y_coords) * target_height / source_height).astype(int)
+            x_scaled = (np.array(x_coords) * target_width / 512).astype(int)
+            y_scaled = (np.array(y_coords) * target_height / 512).astype(int)
             mask = np.zeros((target_height, target_width), dtype=np.uint8)
             cv2.fillPoly(mask, [np.stack((x_scaled, y_scaled), axis=-1)], 1)
             mask_list.append(mask)
@@ -198,8 +199,7 @@ class MyDataset(Dataset):
         for class_name in class_names:
             category_index = self.category[class_name]
             category_conditions.append(self.category_embeddings[category_index])
-        if len(category_conditions) > max_length:
-            category_conditions = category_conditions[:max_length]
+        category_conditions = category_conditions[:max_length]
         while len(category_conditions) < max_length:
             category_conditions.append(np.zeros(768))
         return np.stack(category_conditions)
@@ -211,7 +211,7 @@ class MyDataset(Dataset):
         size = root.find('size')
         img_size = (int(size.find('width').text), int(size.find('height').text), int(size.find('depth').text))
         objects = root.findall('object')
-        bboxes, class_names, prompt_parts = [], [], []
+        bboxes, class_names = [], []
         for obj in objects:
             name = obj.find('name').text
             class_names.append(name)
@@ -220,11 +220,9 @@ class MyDataset(Dataset):
                       'x_right_bottom', 'y_right_bottom', 'x_left_bottom', 'y_left_bottom']
             v = [int(robndbox.find(k).text) for k in coords]
             bboxes.append(([v[0], v[2], v[4], v[6]], [v[1], v[3], v[5], v[7]]))
-            prompt_parts.append(f"{name} at {v}")
         
         image_path = os.path.join(self.image_file_path, filename)
         image = cv2.imread(image_path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        image = cv2.resize(image, self.resolution)
         image = (image.astype(np.float32) / 127.5) - 1.0
-        return image, filename, img_size, bboxes, class_names, " and ".join(prompt_parts)
+        return image, filename, img_size, bboxes, class_names, ""

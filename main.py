@@ -11,6 +11,8 @@ from torch.utils.data import random_split, DataLoader, Dataset, Subset
 from functools import partial
 from PIL import Image
 
+import json
+
 if not hasattr(Image, 'ANTIALIAS'):
     Image.ANTIALIAS = Image.LANCZOS
 
@@ -476,82 +478,110 @@ class DeepSeekClient:
             print(f">>> Network or JSON Error: {e}")
             return None
 
-class DeepSeekRefineCallback(Callback):
-    def __init__(self, api_key, interval=10, batch_size=20):
+# --- 保持你原有的所有函数和 CUDACallback ---
+
+class DeepSeekClient:
+    def __init__(self, api_key):
+        self.api_key = api_key
+        # 修正：补全 v1 路径，这是官方标准地址
+        self.url = "https://api.deepseek.com/v1/chat/completions"
+
+    def fetch_evolved_descriptions(self, class_list, version_idx=0):
+        themes = [
+            "Focus on high-resolution metallic textures and sharp geometric outlines.",
+            "Focus on realistic solar reflections and clear ground shadow projections.",
+            "Focus on sub-meter satellite sensor clarity and atmospheric realism.",
+            "Focus on professional aerial photography aesthetics with industrial details."
+        ]
+        current_theme = themes[version_idx % len(themes)]
+
+        prompt = f"""
+        You are an expert in remote sensing imagery. Please generate enhanced descriptions for the DIOR dataset categories.
+        [Goal]: {current_theme}
+        [Rules]: 
+        1. Must include the exact category name. 
+        2. AVOID specific backgrounds like 'desert' to prevent pixel conflict.
+        3. Use keywords: 'high-resolution', 'sharp texture', 'solar reflections', 'clear shadows'.
+        4. Return ONLY a JSON object: {{"category_name": "enhanced description"}}
+        Categories: {class_list}
+        """
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+        payload = {
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": prompt}],
+            # 强制模型返回 JSON 格式，与你 test.py 的逻辑保持一致
+            "response_format": {"type": "json_object"}
+        }
+
+        try:
+            # 增加 timeout 到 60s 保证大规模类别请求的稳定性
+            response = requests.post(self.url, json=payload, headers=headers, timeout=60)
+            if response.status_code == 200:
+                res_json = response.json()
+                content = res_json['choices'][0]['message']['content']
+                # 解析 DeepSeek 返回的 JSON 字符串
+                return json.loads(content)
+            else:
+                print(f">>> [DeepSeek API Error] Status: {response.status_code}, Msg: {response.text}")
+                return None
+        except Exception as e:
+            print(f">>> [Network Error] 详细报错信息: {e}")
+            return None
+
+class SemanticEvolutionCallback(Callback):
+    def __init__(self, api_key, evolve_every_n_epochs=5):
         super().__init__()
         self.client = DeepSeekClient(api_key)
-        self.interval = interval
-        self.batch_size = batch_size
+        self.evolve_every_n_epochs = evolve_every_n_epochs
+        self.version_count = 0
 
-    # --- 新增：在训练最开始（Epoch 0 之前）执行一次 ---
+    @rank_zero_only
     def on_train_start(self, trainer, pl_module):
-        if trainer.global_rank == 0:
-            print("\n>>> [Initial Phase] Triggering DeepSeek to refine first batch of captions...")
-            self._refine_dataset_captions(trainer)
+        """
+        核心修改：在训练正式开始前（Epoch 0 之前）执行第一次语义进化。
+        确保模型从 Step 0 开始看到的就是 DeepSeek 的高级描述。
+        """
+        print("\n>>> [Initial Evolution] 正在进行启动前的语义预热...")
+        self._evolve_vocabulary(trainer)
 
-    # --- 保持原有：每隔 N 个 Epoch 执行一次 ---
+    @rank_zero_only
     def on_train_epoch_start(self, trainer, pl_module):
         epoch = trainer.current_epoch
-        # 修改判断条件：允许在 Epoch 0 触发（如果需要），或者保持 interval 逻辑
-        if epoch > 0 and epoch % self.interval == 0:
-            if trainer.global_rank == 0:
-                print(f"\n>>> [Epoch {epoch}] Triggering DeepSeek update...")
-                self._refine_dataset_captions(trainer)
+        # 后续每隔 N 轮更新一次。注意这里改成 epoch > 0 避免重复更新
+        if epoch > 0 and epoch % self.evolve_every_n_epochs == 0:
+            print(f"\n>>> [Epoch {epoch}] 正在触发周期性语义演进...")
+            self._evolve_vocabulary(trainer)
 
-    def _refine_dataset_captions(self, trainer):
-        # 1. 尝试从 datamodule 直接获取（这是最稳妥的路径）
-        target_dataset = None
-        if hasattr(trainer, 'datamodule') and trainer.datamodule is not None:
-            # 你的代码里 data = instantiate_from_config(config.data) 得到的是 DataModuleFromConfig
-            dm = trainer.datamodule
-            if hasattr(dm, 'datasets') and 'train' in dm.datasets:
-                target_dataset = dm.datasets['train']
-        
-        # 2. 如果第一步失败，再尝试从 dataloader 找 (逻辑补强)
-        if target_dataset is None:
-            dataloader = trainer.train_dataloader
-            # 某些版本的 Lightning 会返回一个包含多个 loader 的列表
-            if isinstance(dataloader, list): dataloader = dataloader[0]
-            dataset = dataloader.dataset
+    def _evolve_vocabulary(self, trainer):
+        try:
+            # 自动定位数据集逻辑 (保持你原有的 data 引用路径)
+            target_dataset = trainer.datamodule.datasets['train']
             
-            def find_real_dataset(ds):
-                if hasattr(ds, 'files'): return ds
-                if hasattr(ds, 'data'): return find_real_dataset(ds.data)
-                if hasattr(ds, 'dataset'): return find_real_dataset(ds.dataset)
-                # 处理 CombinedDataset 这种通过属性访问内部 list 的情况
-                if hasattr(ds, 'datasets') and isinstance(ds.datasets, list):
-                    for sub_ds in ds.datasets:
-                        found = find_real_dataset(sub_ds)
-                        if found: return found
-                return None
-            target_dataset = find_real_dataset(dataset)
-
-        # 3. 如果还是 WrappedDataset，再取一次内部的 .data
-        if hasattr(target_dataset, 'data'):
-            target_dataset = target_dataset.data
-
-        if target_dataset is None or not hasattr(target_dataset, 'files'):
-            print(f">>> [Error] Still cannot find MyDataset. Object type: {type(target_dataset)}")
-            return
-
-        # --- 以下逻辑执行 API 调用 ---
-        import random
-        total_files = len(target_dataset.files)
-        sample_indices = random.sample(range(total_files), min(self.batch_size, total_files))
-        
-        new_updates = {}
-        for idx in sample_indices:
-            xml_path = target_dataset.files[idx]
-            # 调用底层解析方法
-            _, filename, _, _, class_names, _ = target_dataset._parse_annotation(xml_path)
+            # 递归展开 WrappedDataset
+            while hasattr(target_dataset, 'dataset') or hasattr(target_dataset, 'data'):
+                if hasattr(target_dataset, 'dataset'):
+                    target_dataset = target_dataset.dataset
+                else:
+                    target_dataset = target_dataset.data
             
-            rich_desc = self.client.fetch_rich_caption(class_names)
-            if rich_desc:
-                new_updates[filename] = rich_desc
-        
-        if hasattr(target_dataset, 'update_llm_cache'):
-            target_dataset.update_llm_cache(new_updates)
-            print(f">>> [Success] DeepSeek refined {len(new_updates)} captions for filename tracking.")
+            class_list = list(target_dataset.category.keys())
+            
+            # 获取新语义
+            new_vocab = self.client.fetch_evolved_descriptions(class_list, self.version_count)
+            
+            if new_vocab:
+                # 调用 dataset.py 中你新增的 update_descriptions 方法
+                target_dataset.update_descriptions(new_vocab)
+                self.version_count += 1
+                print(f">>> [Success] 语义已升级至 Version {self.version_count}")
+            else:
+                print(">>> [Warning] DeepSeek 启动更新失败，将暂时使用默认模板。")
+        except Exception as e:
+            print(f">>> [Evolution Error] 无法完成语义初始化: {e}")
 
 if __name__ == "__main__":
     # custom parser to specify config files, train, test and debug mode,
@@ -798,17 +828,11 @@ if __name__ == "__main__":
 
         trainer_kwargs["callbacks"] = [instantiate_from_config(callbacks_cfg[k]) for k in callbacks_cfg]
 
-        # --- 注入 DeepSeek Callback 开始 ---
-        # 请在此处填写你的 DeepSeek API Key
-        DEEPSEEK_API_KEY = "sk-0b6123d9da0a4a2ab04eac5b3d3cf04f" 
-
-        ds_callback = DeepSeekRefineCallback(
-            api_key=DEEPSEEK_API_KEY, 
-            interval=5,      # 每 5 个 Epoch 执行一次
-            batch_size=200   # 每次抽取 200 张图片进行描述进化
-        )
-        trainer_kwargs["callbacks"].append(ds_callback)
-        # --- 注入 DeepSeek Callback 结束 ---
+        # --- 仅添加以下几行，不要删除上面的 ---
+        DEEPSEEK_API_KEY = "sk-0b6123d9da0a4a2ab04eac5b3d3cf04f"
+        ds_evolution_cb = SemanticEvolutionCallback(api_key=DEEPSEEK_API_KEY, evolve_every_n_epochs=5)
+        trainer_kwargs["callbacks"].append(ds_evolution_cb)
+        # ------------------------------------
 
         trainer = Trainer.from_argparse_args(trainer_opt, **trainer_kwargs)
         trainer.logdir = logdir  ###
