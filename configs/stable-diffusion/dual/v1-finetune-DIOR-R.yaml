@@ -1,5 +1,5 @@
 model:
-  base_learning_rate: 1.0e-04
+  base_learning_rate: 1.0e-05
   # target: ldm.models.diffusion.ddpm.LatentDiffusion
   target: bldm.bldm_dual.BLDM
   params:
@@ -7,6 +7,7 @@ model:
     linear_start: 0.00085
     linear_end: 0.0120
     num_timesteps_cond: 1
+    use_ema: false
     log_every_t: 200
     timesteps: 1000
     first_stage_key: "jpg"
@@ -149,6 +150,7 @@ lightning:
     benchmark: True ## torch.backends.cudnn.benchmark
     max_steps: 500000 #500000 ## 
     check_val_every_n_epoch: 50000
+    strategy: "deepspeed_stage_2_offload"
     # num_sanity_val_steps: 0
     # accumulate_grad_batches: 8 #2
     # enable_progress_bar: True

@@ -16,14 +16,14 @@ from ldm.models.diffusion.ddim import DDIMSampler
 from src.datasets.dataset_display import MyDataset
 from torch.utils.data import DataLoader
 
-original_path = 'demo/txt'
-ckpt_file_path = './ckpt/aerogen_diorr_last.ckpt'
-#ckpt_file_path = './ckpt/last.ckpt'
+original_path = 'demo/test_layouts_txt'
+#ckpt_file_path = './ckpt/aerogen_diorr_last.ckpt'
+ckpt_file_path = './ckpt/last1.ckpt'
 resolution = 512
 mask_size = 64
 mode = 'test'
 batch_size = 1
-num_samples = 2
+num_samples = 1
 ddim_steps = 50
 H = 512
 W = 512
@@ -94,7 +94,7 @@ for batch in tqdm(dataloader):
         results = [x_samples[i * num_samples + j] for j in range(num_samples)]
         
         for idx, image_data in enumerate(results):
-            output_dir = os.path.join('./demo/img', str(idx))
+            output_dir = os.path.join('./demo/wjm_img2', str(idx))
             os.makedirs(output_dir, exist_ok=True)
             
             image = Image.fromarray(image_data)
