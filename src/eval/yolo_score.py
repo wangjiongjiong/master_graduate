@@ -47,7 +47,13 @@ def save_inference_results(image_folder, results, output_folder):
         image_path = result.path
         file_name = os.path.basename(image_path)
         save_path = os.path.join(output_folder, file_name)
-        boxes = [(*bbox[:4].tolist(), bbox[4].item(), int(bbox[5])) for bbox in result.boxes.data]
+        # --- 修改开始：增加判空检查 ---
+        if result.boxes is not None:
+            boxes = [(*bbox[:4].tolist(), bbox[4].item(), int(bbox[5])) for bbox in result.boxes.data]
+        else:
+            boxes = [] # 如果没检测到物体，就是一个空列表
+        # --- 修改结束 ---
+        #boxes = [(*bbox[:4].tolist(), bbox[4].item(), int(bbox[5])) for bbox in result.boxes.data]
         plot_results(image_path, boxes, save_path)
 
 def xml_to_coco(xml_folder, image_folder, txt_file, xml_category, filename_to_id):
@@ -108,10 +114,11 @@ def yolo_to_coco_annotations(yolo_results, image_folder, filename_to_id):
         if file_name not in filename_to_id:
             continue  # Skip images not in the mapping
         image_id = filename_to_id[file_name]
-        # image_path = os.path.join(image_folder, file_name)
-        # image = Image.open(image_path)
-        # width, height = image.size
 
+        # --- 修改开始：增加判空检查 ---
+        if result.boxes is None:
+            continue # 如果这张图没检测到东西，直接跳过，处理下一张
+            
         for bbox in result.boxes.data:
             category_id = int(bbox[5])
             xmin, ymin, xmax, ymax = bbox[:4].tolist()
@@ -125,11 +132,12 @@ def yolo_to_coco_annotations(yolo_results, image_folder, filename_to_id):
                 "score": bbox[4].item()
             })
             annotation_id += 1
+        # --- 修改结束 ---
 
     return annotations
 
 def main(xml_folder, image_folder, output_folder, txt_file, batch_size):
-    model = YOLO('best.pt')
+    model = YOLO('/hy-tmp/wjm/master_graduate/src/eval/best.pt')
     
     #----------------------------------delete
     # class_names = model.names
@@ -163,7 +171,7 @@ def main(xml_folder, image_folder, output_folder, txt_file, batch_size):
         results = model(batch_paths)
         all_results.extend(results)
     
-    save_inference_results(image_folder, all_results, output_folder)
+    #save_inference_results(image_folder, all_results, output_folder)
     yolo_annotations = yolo_to_coco_annotations(all_results, image_folder, filename_to_id)
     with open('yolo_result.json', 'w') as f:
         json.dump(yolo_annotations, f, cls=MyEncoder)
@@ -189,9 +197,10 @@ def main(xml_folder, image_folder, output_folder, txt_file, batch_size):
     print(f"mAP50: {coco_eval.stats[1]}")
     print(f"mAP75: {coco_eval.stats[2]}")
 
-xml_folder = "./datasets/DIOR-VOC/Annotations/Horizontal_Bounding_Boxes/"
-image_folder = 'path/generation/image'
+xml_folder = "/hy-tmp/wjm/master_graduate/datasets/DIOR-VOC/Annotations/Horizontal_Bounding_Boxes/"
+#image_folder = '/hy-tmp/wjm/master_graduate/demo/wjm_img2/0'
+image_folder = '/hy-tmp/wjm/master_graduate/datasets/DIOR-VOC/JPEGImages'
 output_folder = './Yolov8_DIOR/pred'
-txt_file = "./Main/test.txt"
+txt_file = "/hy-tmp/wjm/master_graduate/datasets/DIOR-VOC/VOC2007/ImageSets/Main/test.txt"
 
 main(xml_folder, image_folder, output_folder, txt_file, 128)

@@ -150,8 +150,8 @@ lightning:
     benchmark: True ## torch.backends.cudnn.benchmark
     max_steps: 500000 #500000 ## 
     check_val_every_n_epoch: 50000
-    strategy: "deepspeed_stage_2_offload"
+    strategy: "ddp"
     # num_sanity_val_steps: 0
-    # accumulate_grad_batches: 8 #2
+    accumulate_grad_batches: 2 #2
     # enable_progress_bar: True
     ## callbacks: [TQDMProgressBar(refresh_rate=10)]

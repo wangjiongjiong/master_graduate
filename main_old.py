@@ -12,7 +12,6 @@ from functools import partial
 from PIL import Image
 
 import json
-import requests  # 新增，用于调用 DeepSeek API
 
 if not hasattr(Image, 'ANTIALIAS'):
     Image.ANTIALIAS = Image.LANCZOS
@@ -25,6 +24,9 @@ from pytorch_lightning.utilities import rank_zero_info
 
 from ldm.data.base import Txt2ImgIterableBaseDataset
 from ldm.util import instantiate_from_config
+
+import argparse, os, sys, datetime, glob, importlib, csv
+import requests  # 新增，用于调用 DeepSeek API
 
 def get_state_dict(d):
     return d.get('state_dict', d)
@@ -227,15 +229,9 @@ class DataModuleFromConfig(pl.LightningDataModule):
             init_fn = worker_init_fn
         else:
             init_fn = None
-        
-        # 🔴 [修改 1/3] 优化数据加载：启用 persistent_workers 和 pin_memory
-        # 这能极大缓解双卡训练时数据加载卡顿的问题
         return DataLoader(self.datasets["train"], batch_size=self.batch_size,
                           num_workers=self.num_workers, shuffle=False if is_iterable_dataset else True,
-                          worker_init_fn=init_fn,
-                          persistent_workers=True, # 保持 worker 进程存活
-                          prefetch_factor=2,   # 每个 worker 预取 2 个 batch
-                          pin_memory=True)         # 加速内存到显存传输
+                          worker_init_fn=init_fn)
 
     def _val_dataloader(self, shuffle=False):
         if isinstance(self.datasets['validation'], Txt2ImgIterableBaseDataset) or self.use_worker_init_fn:
@@ -246,9 +242,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
                           batch_size=self.batch_size,
                           num_workers=self.num_workers,
                           worker_init_fn=init_fn,
-                          shuffle=shuffle,
-                          persistent_workers=True, # 🔴 同样应用到验证集
-                          pin_memory=True)
+                          shuffle=shuffle)
 
     def _test_dataloader(self, shuffle=False):
         is_iterable_dataset = isinstance(self.datasets['train'], Txt2ImgIterableBaseDataset)
@@ -451,6 +445,43 @@ class CUDACallback(Callback):
         except AttributeError:
             pass
 
+    # --- 新增 DeepSeek 逻辑开始 ---
+class DeepSeekClient:
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.url = "https://api.deepseek.com/chat/completions"
+
+    def fetch_rich_caption(self, class_names):
+        items = ", ".join(class_names)
+        prompt = (f"As an expert in satellite imagery, describe a scene containing: {items}. "
+                  f"Provide a natural, vivid one-sentence description focusing on typical aerial textures "
+                  f"and spatial arrangements. Keep it under 40 words.")
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+        payload = {
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7
+        }
+        try:
+            response = requests.post(self.url, json=payload, headers=headers, timeout=15)
+            res_json = response.json()
+            
+            # 如果报错 'choices'，我们就看看到底返回了什么
+            if 'choices' not in res_json:
+                print(f">>> DeepSeek API Response Error: {res_json}")
+                return None
+                
+            return res_json['choices'][0]['message']['content']
+        except Exception as e:
+            print(f">>> Network or JSON Error: {e}")
+            return None
+
+# --- 保持你原有的所有函数和 CUDACallback ---
+
 class DeepSeekClient:
     def __init__(self, api_key):
         self.api_key = api_key
@@ -561,6 +592,41 @@ if __name__ == "__main__":
     # `nested.key=value` arguments are interpreted as config parameters.
     # configs are merged from left-to-right followed by command line parameters.
 
+    # model:
+    #   base_learning_rate: float
+    #   target: path to lightning module
+    #   params:
+    #       key: value
+    # data:
+    #   target: main.DataModuleFromConfig
+    #   params:
+    #      batch_size: int
+    #      wrap: bool
+    #      train:
+    #          target: path to train dataset
+    #          params:
+    #              key: value
+    #      validation:
+    #          target: path to validation dataset
+    #          params:
+    #              key: value
+    #      test:
+    #          target: path to test dataset
+    #          params:
+    #              key: value
+    # lightning: (optional, has sane defaults and can be specified on cmdline)
+    #   trainer:
+    #       additional arguments to trainer
+    #   logger:
+    #       logger to instantiate
+    #   modelcheckpoint:
+    #       modelcheckpoint to instantiate
+    #   callbacks:
+    #       callback1:
+    #           target: importpath
+    #           params:
+    #               key: value
+
     now = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
 
     # add cwd for convenience and to make classes in this file available when
@@ -572,20 +638,6 @@ if __name__ == "__main__":
     parser = Trainer.add_argparse_args(parser)
 
     opt, unknown = parser.parse_known_args()
-    # 3. 确定 logdir 的路径（这部分你需要确认一下逻辑）
-    # 建议直接把这几行粘过去，确保 logdir 变量在这里是可用的
-    if opt.name:
-        name = "_" + opt.name
-    else:
-        name = ""
-    nowname = now + name + opt.postfix
-    logdir = os.path.abspath(os.path.join(opt.logdir, nowname))
-
-    # 🔴 [重点：在这里插入强制修复路径的代码]
-    print(f">>> 正在预创建日志目录: {logdir}")
-    os.makedirs(logdir, exist_ok=True)
-    # 提前建立 testtube 深度目录，防止 Rank 0 和 Rank 1 冲突
-    os.makedirs(os.path.join(logdir, "testtube/version_0"), exist_ok=True)
     if opt.name and opt.resume:
         raise ValueError(
             "-n/--name and -r/--resume cannot be specified both."
@@ -621,12 +673,7 @@ if __name__ == "__main__":
         else:
             name = ""
         nowname = now + name + opt.postfix
-        
-        # 🔴 [修改 2/3] 转换为绝对路径
-        # 解决 ddp_spawn 下子进程找不到 ./log 相对路径的问题
-        logdir = os.path.abspath(os.path.join(opt.logdir, nowname))
-
-# ... (前面的代码保持不变) ...
+        logdir = os.path.join(opt.logdir, nowname)
 
     ckptdir = os.path.join(logdir, "checkpoints")
     cfgdir = os.path.join(logdir, "configs")
@@ -638,53 +685,24 @@ if __name__ == "__main__":
         cli = OmegaConf.from_dotlist(unknown)
         config = OmegaConf.merge(*configs, cli)
         lightning_config = config.pop("lightning", OmegaConf.create())
-        
         # merge trainer cli with config
         trainer_config = lightning_config.get("trainer", OmegaConf.create())
-
-        # ================== 🔴 核心修复开始 ==================
-        # 目标：彻底杀死 ddp_spawn，强制开启 ddp
-        
-        # 1. 先清理掉可能冲突的旧参数
-        for k in ["accelerator", "strategy", "devices", "gpus"]:
-            if k in trainer_config:
-                del trainer_config[k]
-        
-        # 2. 根据 PL 版本选择正确的 DDP 开启姿势
-        # 你的环境很可能低于 1.5.0，所以之前的 strategy="ddp" 没用
-        if version.parse(pl.__version__) < version.parse('1.5.0'):
-            print(f"⚠️ 检测到旧版本 PyTorch Lightning ({pl.__version__})")
-            print("👉 正在强制使用 accelerator='ddp' 模式...")
-            trainer_config["accelerator"] = "ddp"
-            trainer_config["gpus"] = -1  # 使用所有可见 GPU
-            
-            # 清理掉旧版本不支持的参数，防止报错
-            if "strategy" in trainer_config: del trainer_config["strategy"]
-            if "devices" in trainer_config: del trainer_config["devices"]
-        else:
-            print(f"✅ 检测到新版本 PyTorch Lightning ({pl.__version__})")
-            print("👉 正在强制使用 strategy='ddp' 模式...")
-            trainer_config["accelerator"] = "gpu"
-            trainer_config["strategy"] = "ddp"
-            trainer_config["devices"] = -1 # 使用所有可见 GPU
-
-        # 3. 补全其他命令行参数
+        # default to ddp
+        trainer_config["accelerator"] = "gpu"
+        trainer_config["strategy"] = "ddp"
+        trainer_config["gpus"] = 8
+        trainer_config["devices"] = 8
         for k in nondefault_trainer_args(opt):
             trainer_config[k] = getattr(opt, k)
-            
-        # 4. CPU/GPU 兜底检查
-        if not "gpus" in trainer_config and not "devices" in trainer_config:
-             # 如果上面逻辑漏了，或者是纯 CPU 环境
-             if "accelerator" in trainer_config: del trainer_config["accelerator"]
-             cpu = True
+        if not "gpus" in trainer_config:
+            del trainer_config["accelerator"]
+            cpu = True
         else:
-             gpuinfo = trainer_config.get("gpus", trainer_config.get("devices"))
-             print(f"Running on GPUs (count): {gpuinfo}")
-             cpu = False
-
+            gpuinfo = trainer_config["gpus"]
+            print(f"Running on GPUs {gpuinfo}")
+            cpu = False
         trainer_opt = argparse.Namespace(**trainer_config)
         lightning_config.trainer = trainer_config
-        # ================== 🔴 核心修复结束 ==================
 
         # model
         model = instantiate_from_config(config.model)
@@ -708,18 +726,11 @@ if __name__ == "__main__":
                 "target": "pytorch_lightning.loggers.TestTubeLogger",
                 "params": {
                     "name": "testtube",
-                    "save_dir": logdir, # 已经是绝对路径了
-                }
-            },
-            "tensorboard": {  # 👈 建议换成这个
-                "target": "pytorch_lightning.loggers.TensorBoardLogger",
-                "params": {
                     "save_dir": logdir,
-                    "name": "tb_logs",
                 }
             },
         }
-        default_logger_cfg = default_logger_cfgs["tensorboard"]
+        default_logger_cfg = default_logger_cfgs["testtube"]
         if "logger" in lightning_config:
             logger_cfg = lightning_config.logger
         else:
